@@ -127,7 +127,7 @@ class ScaleNode(SimpleFilterNode):
                 h = int(scale)
         else:
             (w, h) = [int(dim) for dim in scale]
-        super().__init__(input, "scale", *args, w=w, h=h)
+        super().__init__(input, "scale", *args, w=w, h=h, **kwargs)
 
 class ChangeVSpeedNode(SimpleFilterNode):
     def __init__(self, input, speed, *args, **kwargs):
@@ -147,15 +147,13 @@ def ChangeSpeedNode(input, speed, *args, **kwargs):
     return n2
 
 class ConcatNode(Node):
-    def __init__(self, inputs, *args, v=None, a=None, **kwargs):
+    def __init__(self, inputs, v=None, a=None, **kwargs):
         if v is None:
             v = min([i.v for i in inputs])
         if a is None:
             a = min([i.a for i in inputs])
         super().__init__(v, a, 0) # concat filter doesn't support subtitles
         self.inputs = inputs
-        self.args = args
-        self.kwargs = kwargs
 
     def render(self, instance):
         rendered_inputs = [i.render(instance) for i in self.inputs]
@@ -166,15 +164,39 @@ class ConcatNode(Node):
             stream_inputs += a[0:self.a]
 
         filter="concat=n={}:v={}:a={}".format(len(self.inputs), self.v, self.a)
-        filter += ":".join(
-            ["{}={}".format(k, v) for (k, v) in self.kwargs.items()] +
-            [str(v) for v in self.args]
-        )
-        
+
         outputs = instance.add_filter(stream_inputs, filter, self.v + self.a)
         v_outputs = outputs[0:self.v]
         a_outputs = outputs[self.v:]
         return (v_outputs, a_outputs, [])
+
+class AddAudioNode(Node):
+    def __init__(self, input, audio, *args, **kwargs):
+        if audio.a == 0 or (input.a > 0 and audio.a != 1 and audio.a != input.a):
+            raise Exception("Bad number of audio tracks to mix in")
+        super().__init__(input.v, max(audio.a, input.a), input.s)
+        self.input = input
+        self.audio = audio
+        self.args = args
+        self.kwargs = kwargs
+
+    def render(self, instance):
+        (v, a1, s) = self.input.render(instance)
+        (_, a2, _) = self.audio.render(instance)
+        if len(a1) == 0: # If no existing audio, simply add the new audio tracks
+            return (v, a2, s)
+        filter = "amix=2"
+        if self.kwargs or self.args:
+            filter += ":" + ":".join(
+                ["{}={}".format(k, v) for (k, v) in self.kwargs.items()] +
+                [str(v) for v in self.args]
+            )
+        if len(a1) == len(a2): # Element-wise mixing
+            a_out = [instance.add_filter([t1, t2], filter)[0] for (t1, t2) in zip(a1, a2)]
+            return (v, a_out, s)
+        # Mix the same audio track with every input track
+        a_out = [instance.add_filter([stream, a2[0]], filter)[0] for stream in a1]
+        return (v, a_out, s)
 
 def parse(obj):
     if isinstance(obj, str):
@@ -187,6 +209,10 @@ def parse(obj):
         elif "input" in obj:
             n = parse(obj["input"])
             del obj["input"]
+        elif "clips" in obj:
+            inputs = [parse(clip) for clip in obj["clips"]]
+            del obj["clips"]
+            n = ConcatNode(inputs, **obj)
         else:
             raise Exception("Could not find an input")
 
@@ -197,6 +223,8 @@ def parse(obj):
                 n = ScaleNode(n, obj["scale"])
             if "speed" in obj:
                 n = ChangeSpeedNode(n, obj["speed"])
+            if "audio" in obj:
+                n = AddAudioNode(n, parse(obj["audio"]))
         return n
 
 if __name__ == "__main__":

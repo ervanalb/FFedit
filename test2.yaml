@@ -1,12 +1,16 @@
 ---
 all:
+  a=0
+  clips:
+  - ../laser.mp4
+  - ../laser.mp4
   - file: ../vids/dive.mp4
-    a: False
     start: 5
     duration: 2
   - file: ../vids/dive.mp4
-    a: False
+    a: 0
     start: 5
     duration: 2
     speed: 0.5
+  audio: ../mambo.mp3
 output: ["-preset", "ultrafast", "output.mkv"]
