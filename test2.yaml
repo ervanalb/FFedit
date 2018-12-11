@@ -1,9 +1,12 @@
 ---
 all:
-    file: ../vids/dive.mp4
+  - file: ../vids/dive.mp4
     a: False
     start: 5
-    duration: 3
-    scale: 320x240
+    duration: 2
+  - file: ../vids/dive.mp4
+    a: False
+    start: 5
+    duration: 2
     speed: 0.5
 output: ["-preset", "ultrafast", "output.mkv"]

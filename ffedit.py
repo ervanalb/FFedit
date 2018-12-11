@@ -62,9 +62,9 @@ class FFmpegInstance:
 
 class Node:
     def __init__(self, v=1, a=1, s=0):
-        self.v = v
-        self.a = a
-        self.s = s
+        self.v = int(v)
+        self.a = int(a)
+        self.s = int(s)
 
 class FileNode(Node):
     def __init__(self, file, start=None, duration=None, v=1, a=1, s=0, **kwargs):
@@ -146,11 +146,41 @@ def ChangeSpeedNode(input, speed, *args, **kwargs):
     n2 = ChangeASpeedNode(n1, speed, *args, **kwargs)
     return n2
 
+class ConcatNode(Node):
+    def __init__(self, inputs, *args, v=None, a=None, **kwargs):
+        if v is None:
+            v = min([i.v for i in inputs])
+        if a is None:
+            a = min([i.a for i in inputs])
+        super().__init__(v, a, 0) # concat filter doesn't support subtitles
+        self.inputs = inputs
+        self.args = args
+        self.kwargs = kwargs
+
+    def render(self, instance):
+        rendered_inputs = [i.render(instance) for i in self.inputs]
+
+        stream_inputs = []
+        for (v, a, s) in rendered_inputs:
+            stream_inputs += v[0:self.v]
+            stream_inputs += a[0:self.a]
+
+        filter="concat=n={}:v={}:a={}".format(len(self.inputs), self.v, self.a)
+        filter += ":".join(
+            ["{}={}".format(k, v) for (k, v) in self.kwargs.items()] +
+            [str(v) for v in self.args]
+        )
+        
+        outputs = instance.add_filter(stream_inputs, filter, self.v + self.a)
+        v_outputs = outputs[0:self.v]
+        a_outputs = outputs[self.v:]
+        return (v_outputs, a_outputs, [])
+
 def parse(obj):
     if isinstance(obj, str):
         return FileNode(obj)
     elif isinstance(obj, list):
-        raise NotImplementedError("Concat not implemented!")
+        return ConcatNode([parse(subobj) for subobj in obj])
     else:
         if "file" in obj:
             n = FileNode(**obj)
