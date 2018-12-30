@@ -60,43 +60,40 @@ class FFmpegInstance:
         if not dry:
             subprocess.check_call(cmdline)
 
+def obj_to_args(obj):
+    args = []
+    kwargs = {}
+    if isinstance(obj, str) or isinstance(obj, float) or isinstance(obj, int):
+        args = [obj]
+    elif isinstance(obj, list):
+        args = obj
+    elif isinstance(obj, dict):
+        kwargs = obj
+    else:
+        raise TypeError(obj)
+    return (args, kwargs)
+
 class Node:
-    def __init__(self, v=1, a=1, s=0):
+    def __init__(self, v=1, a=1, s=0, **kwargs):
         self.v = int(v)
         self.a = int(a)
         self.s = int(s)
+        for k, v in kwargs.items():
+            setattr(self, k, v)
 
-class FileNode(Node):
-    def __init__(self, file, start=None, duration=None, v=1, a=1, s=0, **kwargs):
-        super().__init__(v, a, s)
-        self.file = file
-        self.start = start
-        self.duration = duration
-
-    def to_input_cmdline(self):
-        cmdline = ["-i", self.file]
-        if self.duration is not None:
-            cmdline = ["-t", str(self.duration)] + cmdline
-        if self.start is not None:
-            cmdline = ["-ss", str(self.start)] + cmdline
-        return cmdline
-
-    def render(self, instance):
-        stream_n = instance.add_input(self.to_input_cmdline())
-        def gen_stream_names(type, count):
-            return ["{}:{}:{}".format(stream_n, type, i) for i in range(count)]
-        return (gen_stream_names("v", self.v),
-                gen_stream_names("a", self.a),
-                gen_stream_names("s", self.s))
+    def reduce(self):
+        return self
 
 class SimpleFilterNode(Node):
-    def __init__(self, input, filter, *args, type="v", **kwargs):
+    def __init__(self, input, filter, *args, type="v", kwargs=None, **kwargs2):
         super().__init__(input.v, input.a, input.s)
         self.input = input
         self.filter = filter
         self.type = type
         self.args = args
-        self.kwargs = kwargs
+        if kwargs is not None:
+            kwargs2.update(kwargs)
+        self.kwargs = kwargs2
 
     def run(self, instance, stream):
         filter = self.filter
@@ -108,7 +105,7 @@ class SimpleFilterNode(Node):
         return instance.add_filter([stream], filter)[0]
 
     def render(self, instance):
-        (v, a, s) = self.input.render(instance)
+        (v, a, s) = self.input.reduce().render(instance)
         if "v" in self.type:
             v = [self.run(instance, stream) for stream in v]
         if "a" in self.type:
@@ -146,8 +143,66 @@ def ChangeSpeedNode(input, speed, *args, **kwargs):
     n2 = ChangeASpeedNode(n1, speed, *args, **kwargs)
     return n2
 
-class ConcatNode(Node):
-    def __init__(self, inputs, v=None, a=None, **kwargs):
+class CompoundNode(Node):
+    def __init__(self, v=1, a=1, s=0, **kwargs):
+        super().__init__(v, a, s, **kwargs)
+
+    def reduce(self):
+        n = self
+
+        def apply_filter(filter_name, options):
+            nonlocal n
+            (args, kwargs) = obj_to_args(options)
+            n = FILTERS[k](n, *args, **kwargs)
+
+        for k in IMPLICIT_FILTERS:
+            if hasattr(self, k):
+                options = getattr(self, k)
+                apply_filter(k, options)
+
+        if hasattr(self, "filters"):
+            for f in self.filters:
+                if isinstance(f, dict) and len(f.items()) == 1:
+                    filter_name, options = list(f.items())[0]
+                    apply_filter(filter_name, options)
+                else:
+                    raise TypeError(f)
+        return n
+
+class FileNode(CompoundNode):
+    def __init__(self, file, start=None, duration=None, v=1, a=1, s=0, **kwargs):
+        super().__init__(v, a, s)
+        self.file = file
+        self.start = start
+        self.duration = duration
+
+    def to_input_cmdline(self):
+        cmdline = ["-i", self.file]
+        if self.duration is not None:
+            cmdline = ["-t", str(self.duration)] + cmdline
+        if self.start is not None:
+            cmdline = ["-ss", str(self.start)] + cmdline
+        return cmdline
+
+    def render(self, instance):
+        stream_n = instance.add_input(self.to_input_cmdline())
+        def gen_stream_names(type, count):
+            return ["{}:{}:{}".format(stream_n, type, i) for i in range(count)]
+        return (gen_stream_names("v", self.v),
+                gen_stream_names("a", self.a),
+                gen_stream_names("s", self.s))
+
+class ConcatNode(CompoundNode):
+    def __init__(self, *args, v=None, a=None, **kwargs):
+        if len(args) == 1 and isinstance(args[0], list):
+            inputs = args[0]
+        elif len(args) >= 1:
+            inputs = args
+        elif "inputs" in kwargs:
+            inputs = kwargs["inputs"]
+        else:
+            raise TypeError("Could not deduce inputs for {}".format(__class__.__name__))
+        inputs = [i if isinstance(i, Node) else parse(i) for i in inputs]
         if v is None:
             v = min([i.v for i in inputs])
         if a is None:
@@ -156,7 +211,7 @@ class ConcatNode(Node):
         self.inputs = inputs
 
     def render(self, instance):
-        rendered_inputs = [i.render(instance) for i in self.inputs]
+        rendered_inputs = [i.reduce().render(instance) for i in self.inputs]
 
         stream_inputs = []
         for (v, a, s) in rendered_inputs:
@@ -181,8 +236,8 @@ class AddAudioNode(Node):
         self.kwargs = kwargs
 
     def render(self, instance):
-        (v, a1, s) = self.input.render(instance)
-        (_, a2, _) = self.audio.render(instance)
+        (v, a1, s) = self.input.reduce().render(instance)
+        (_, a2, _) = self.audio.reduce().render(instance)
         if len(a1) == 0: # If no existing audio, simply add the new audio tracks
             return (v, a2, s)
         filter = "amix=2"
@@ -202,30 +257,50 @@ def parse(obj):
     if isinstance(obj, str):
         return FileNode(obj)
     elif isinstance(obj, list):
-        return ConcatNode([parse(subobj) for subobj in obj])
+        return ConcatNode(*obj)
+    elif isinstance(obj, dict) and len(obj.items()) == 1:
+        node_name, options = list(obj.items())[0]
+        (args, kwargs) = obj_to_args(options)
+        return NODES[node_name](*args, **kwargs)
     else:
-        if "file" in obj:
-            n = FileNode(**obj)
-        elif "input" in obj:
-            n = parse(obj["input"])
-            del obj["input"]
-        elif "clips" in obj:
-            inputs = [parse(clip) for clip in obj["clips"]]
-            del obj["clips"]
-            n = ConcatNode(inputs, **obj)
-        else:
-            raise Exception("Could not find an input")
+        raise TypeError(obj)
+        #if "file" in obj:
+        #    n = FileNode(**obj)
+        #elif "input" in obj:
+        #    n = parse(obj["input"])
+        #    del obj["input"]
+        #elif "clips" in obj:
+        #    inputs = [parse(clip) for clip in obj["clips"]]
+        #    del obj["clips"]
+        #    n = ConcatNode(inputs, **obj)
+        #else:
+        #    raise Exception("Could not find an input")
 
-        if "filter" in obj:
-            n = SimpleFilterNode(n, **obj)
-        else:
-            if "scale" in obj:
-                n = ScaleNode(n, obj["scale"])
-            if "speed" in obj:
-                n = ChangeSpeedNode(n, obj["speed"])
-            if "audio" in obj:
-                n = AddAudioNode(n, parse(obj["audio"]))
-        return n
+        #if "filter" in obj:
+        #    n = SimpleFilterNode(n, **obj)
+        #else:
+        #    if "scale" in obj:
+        #        n = ScaleNode(n, obj["scale"])
+        #    if "speed" in obj:
+        #        n = ChangeSpeedNode(n, obj["speed"])
+        #    if "audio" in obj:
+        #        n = AddAudioNode(n, parse(obj["audio"]))
+        #return n
+
+IMPLICIT_FILTERS = [
+    "scale",
+    "speed"
+]
+
+NODES = {
+    "clip": FileNode,
+    "concat": ConcatNode,
+}
+
+FILTERS = {
+    "scale": ScaleNode,
+    "speed": ChangeSpeedNode,
+}
 
 if __name__ == "__main__":
     fn = sys.argv[1]
@@ -245,7 +320,7 @@ if __name__ == "__main__":
     if "output" in obj:
         ff.set_output(obj["output"])
     node = parse(part)
-    ff.set_map(node.render(ff))
+    ff.set_map(node.reduce().render(ff))
     ff.run()
 
     #cmdline = flags + inputs + ["-filter_complex", concat_filter, "-map", "[outv]"] + output
