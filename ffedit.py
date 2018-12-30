@@ -79,6 +79,9 @@ def obj_to_args(obj):
         raise TypeError("Expected scalar, list, or dict, but got {}".format(repr(obj)))
     return (args, kwargs)
 
+def ensure_node(obj):
+    return obj if isinstance(obj, Node) else parse(obj)
+
 class Node:
     def __init__(self, v=1, a=1, s=0, **kwargs):
         self.v = int(v)
@@ -122,10 +125,11 @@ class CompoundNode(Node):
         return result
 
 class SimpleFilterNode(Node):
-    def __init__(self, input, filter, *args, type="v", kwargs=None, **kwargs2):
+    def __init__(self, input, name, *args, type="v", kwargs=None, **kwargs2):
+        input = ensure_node(input)
         super().__init__(input.v, input.a, input.s)
         self.input = input
-        self.filter = filter
+        self.name = name
         self.type = type
         self.args = args
         if kwargs is not None:
@@ -133,7 +137,7 @@ class SimpleFilterNode(Node):
         self.kwargs = kwargs2
 
     def run(self, instance, stream):
-        filter = self.filter
+        filter = self.name
         if self.kwargs or self.args:
             filter += "=" + ":".join(
                 ["{}={}".format(k, v) for (k, v) in self.kwargs.items()] +
@@ -210,7 +214,7 @@ class ConcatNode(CompoundNode):
             inputs = kwargs["inputs"]
         else:
             raise TypeError("Could not deduce inputs for {}".format(__class__.__name__))
-        inputs = [i if isinstance(i, Node) else parse(i) for i in inputs]
+        inputs = [ensure_node(i) for i in inputs]
         if v is None:
             v = min([i.v for i in inputs])
         if a is None:
@@ -286,7 +290,10 @@ NODES = {
 FILTERS = {
     "scale": ScaleNode,
     "speed": ChangeSpeedNode,
+    "filter": SimpleFilterNode,
 }
+
+NODES.update(FILTERS)
 
 if __name__ == "__main__":
     fn = sys.argv[1]
