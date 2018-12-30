@@ -60,6 +60,12 @@ class FFmpegInstance:
         if not dry:
             subprocess.check_call(cmdline)
 
+def get_singleton(obj):
+    if isinstance(obj, dict) and len(obj.items()) == 1:
+        return tuple(obj.items())[0]
+    else:
+        raise TypeError("Expected a dict with one element, got {}".format(repr(obj)))
+
 def obj_to_args(obj):
     args = []
     kwargs = {}
@@ -70,7 +76,7 @@ def obj_to_args(obj):
     elif isinstance(obj, dict):
         kwargs = obj
     else:
-        raise TypeError(obj)
+        raise TypeError("Expected scalar, list, or dict, but got {}".format(repr(obj)))
     return (args, kwargs)
 
 class Node:
@@ -81,8 +87,39 @@ class Node:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-    def reduce(self):
-        return self
+    def reduce_and_render(self, instance):
+        return self.render(instance)
+
+class CompoundNode(Node):
+    def __init__(self, v=1, a=1, s=0, **kwargs):
+        super().__init__(v, a, s, **kwargs)
+        self._reduced = False
+
+    def reduce_and_render(self, instance):
+        if self._reduced:
+            return self.render(instance)
+
+        # This temporary flag prevents infinite recursion
+        self._reduced = True
+        n = self
+
+        for k in IMPLICIT_FILTERS:
+            if hasattr(self, k):
+                options = getattr(self, k)
+                (args, kwargs) = obj_to_args(options)
+                n = FILTERS[k](n, *args, **kwargs)
+
+        if hasattr(self, "filters"):
+            for f in self.filters:
+                if isinstance(f, str):
+                    n = FILTERS[k](n)
+                else:
+                    (k, options) = get_singleton(f)
+                    (args, kwargs) = obj_to_args(options)
+                    n = FILTERS[k](n, *args, **kwargs)
+        result = n.render(instance)
+        self._reduced = False
+        return result
 
 class SimpleFilterNode(Node):
     def __init__(self, input, filter, *args, type="v", kwargs=None, **kwargs2):
@@ -105,7 +142,7 @@ class SimpleFilterNode(Node):
         return instance.add_filter([stream], filter)[0]
 
     def render(self, instance):
-        (v, a, s) = self.input.reduce().render(instance)
+        (v, a, s) = self.input.reduce_and_render(instance)
         if "v" in self.type:
             v = [self.run(instance, stream) for stream in v]
         if "a" in self.type:
@@ -127,54 +164,25 @@ class ScaleNode(SimpleFilterNode):
         super().__init__(input, "scale", *args, w=w, h=h, **kwargs)
 
 class ChangeVSpeedNode(SimpleFilterNode):
-    def __init__(self, input, speed, *args, **kwargs):
+    def __init__(self, input, speed, **kwargs):
         speed = float(speed)
         expr = "PTS*{}".format(1. / speed)
-        super().__init__(input, "setpts", expr)
+        super().__init__(input, "setpts", expr, **kwargs)
 
 class ChangeASpeedNode(SimpleFilterNode):
-    def __init__(self, input, speed, *args, **kwargs):
+    def __init__(self, input, speed, **kwargs):
         speed = float(speed)
         expr = "PTS*{}".format(1. / speed)
-        super().__init__(input, "asetpts", expr, type="a")
+        super().__init__(input, "asetpts", expr, type="a", **kwargs)
 
-def ChangeSpeedNode(input, speed, *args, **kwargs):
-    n1 = ChangeVSpeedNode(input, speed, *args, **kwargs)
-    n2 = ChangeASpeedNode(n1, speed, *args, **kwargs)
+def ChangeSpeedNode(input, speed, **kwargs):
+    n1 = ChangeVSpeedNode(input, speed, **kwargs)
+    n2 = ChangeASpeedNode(n1, speed, **kwargs)
     return n2
 
-class CompoundNode(Node):
-    def __init__(self, v=1, a=1, s=0, **kwargs):
-        super().__init__(v, a, s, **kwargs)
-
-    def reduce(self):
-        n = self
-
-        def apply_filter(filter_name, options):
-            nonlocal n
-            (args, kwargs) = obj_to_args(options)
-            n = FILTERS[k](n, *args, **kwargs)
-
-        for k in IMPLICIT_FILTERS:
-            if hasattr(self, k):
-                options = getattr(self, k)
-                apply_filter(k, options)
-
-        if hasattr(self, "filters"):
-            for f in self.filters:
-                if isinstance(f, dict) and len(f.items()) == 1:
-                    filter_name, options = list(f.items())[0]
-                    apply_filter(filter_name, options)
-                else:
-                    raise TypeError(f)
-        return n
-
-class FileNode(CompoundNode):
+class ClipNode(CompoundNode):
     def __init__(self, file, start=None, duration=None, v=1, a=1, s=0, **kwargs):
-        super().__init__(v, a, s)
-        self.file = file
-        self.start = start
-        self.duration = duration
+        super().__init__(file=file, start=start, duration=duration, v=v, a=a, s=s, **kwargs)
 
     def to_input_cmdline(self):
         cmdline = ["-i", self.file]
@@ -211,7 +219,7 @@ class ConcatNode(CompoundNode):
         self.inputs = inputs
 
     def render(self, instance):
-        rendered_inputs = [i.reduce().render(instance) for i in self.inputs]
+        rendered_inputs = [i.reduce_and_render(instance) for i in self.inputs]
 
         stream_inputs = []
         for (v, a, s) in rendered_inputs:
@@ -236,8 +244,8 @@ class AddAudioNode(Node):
         self.kwargs = kwargs
 
     def render(self, instance):
-        (v, a1, s) = self.input.reduce().render(instance)
-        (_, a2, _) = self.audio.reduce().render(instance)
+        (v, a1, s) = self.input.reduce_and_render(instance)
+        (_, a2, _) = self.audio.reduce_and_render(instance)
         if len(a1) == 0: # If no existing audio, simply add the new audio tracks
             return (v, a2, s)
         filter = "amix=2"
@@ -255,37 +263,15 @@ class AddAudioNode(Node):
 
 def parse(obj):
     if isinstance(obj, str):
-        return FileNode(obj)
+        return ClipNode(obj)
     elif isinstance(obj, list):
         return ConcatNode(*obj)
     elif isinstance(obj, dict) and len(obj.items()) == 1:
-        node_name, options = list(obj.items())[0]
+        (node_name, options) = get_singleton(obj)
         (args, kwargs) = obj_to_args(options)
         return NODES[node_name](*args, **kwargs)
     else:
         raise TypeError(obj)
-        #if "file" in obj:
-        #    n = FileNode(**obj)
-        #elif "input" in obj:
-        #    n = parse(obj["input"])
-        #    del obj["input"]
-        #elif "clips" in obj:
-        #    inputs = [parse(clip) for clip in obj["clips"]]
-        #    del obj["clips"]
-        #    n = ConcatNode(inputs, **obj)
-        #else:
-        #    raise Exception("Could not find an input")
-
-        #if "filter" in obj:
-        #    n = SimpleFilterNode(n, **obj)
-        #else:
-        #    if "scale" in obj:
-        #        n = ScaleNode(n, obj["scale"])
-        #    if "speed" in obj:
-        #        n = ChangeSpeedNode(n, obj["speed"])
-        #    if "audio" in obj:
-        #        n = AddAudioNode(n, parse(obj["audio"]))
-        #return n
 
 IMPLICIT_FILTERS = [
     "scale",
@@ -293,7 +279,7 @@ IMPLICIT_FILTERS = [
 ]
 
 NODES = {
-    "clip": FileNode,
+    "clip": ClipNode,
     "concat": ConcatNode,
 }
 
@@ -313,14 +299,12 @@ if __name__ == "__main__":
 
     ff = FFmpegInstance()
 
-    #inputs = clips_to_input(**part)
-    #concat_filter = clips_to_concat_filter(**part)
     if "flags" in obj:
         ff.set_flags(obj["flags"])
     if "output" in obj:
         ff.set_output(obj["output"])
     node = parse(part)
-    ff.set_map(node.reduce().render(ff))
+    ff.set_map(node.reduce_and_render(ff))
     ff.run()
 
     #cmdline = flags + inputs + ["-filter_complex", concat_filter, "-map", "[outv]"] + output

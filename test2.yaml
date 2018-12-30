@@ -3,8 +3,6 @@ all:
   concat:
     a: 0
     inputs:
-      - ../laser.mp4
-      - ../laser.mp4
       - clip:
           file: ../vids/dive.mp4
           start: 5
