@@ -5,6 +5,48 @@ import sys
 import subprocess
 import shlex
 
+ffprobe = "ffprobe"
+ffprobe_flags = ["-loglevel", "warning", "-hide_banner", "-show_streams"]
+
+def analyze_file(file):
+    cmdline = [ffprobe] + ffprobe_flags + [file]
+    s = " ".join([shlex.quote(c) for c in cmdline])
+    print(s)
+    result = str(subprocess.check_output(cmdline), encoding="latin1")
+    lines = result.split("\n")
+    streams = []
+    cur_stream = {}
+    cur_tag = None
+    for l in lines:
+        if not l:
+            continue
+        if cur_tag is None:
+            if l == "[STREAM]":
+                cur_tag = l
+            else:
+                raise ValueError("Could not parse ffprobe output (expected [STREAM], got {})".format(l))
+        else:
+            if l == "[/STREAM]":
+                cur_tag = None
+                streams.append(cur_stream)
+                cur_stream = {}
+            else:
+                (k, v) = l.split("=")
+                cur_stream[k] = v
+    if cur_tag is not None:
+        raise ValueError("Could not parse ffprobe output (missing [/STREAM])")
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    # TODO subtitles?
+    result = {}
+    result["v"] = len(video_streams)
+    result["a"] = len(audio_streams)
+    result["s"] = 0
+    durations = [float(s["duration"]) for s in video_streams + audio_streams if "duration" in s]
+    if durations:
+        result["t"] = max(durations)
+    return result
+
 class FFmpegInstance:
     def __init__(self):
         self.ffmpeg = "ffmpeg"
@@ -15,6 +57,7 @@ class FFmpegInstance:
         self.flags = ["-y", "-loglevel", "warning", "-stats"]
         self.map = []
         self.output = ["out.mkv"]
+        self.dry = False
 
     def add_input(self, i):
         self.inputs += i
@@ -49,7 +92,7 @@ class FFmpegInstance:
     def set_output(self, output):
         self.output = output
 
-    def run(self, dry=False):
+    def run(self):
         filter = []
         if self.filter:
             filter_str = ",".join(self.filter)
@@ -57,8 +100,9 @@ class FFmpegInstance:
         cmdline = [self.ffmpeg] + self.flags + self.inputs + filter + self.map + self.output
         s = " ".join([shlex.quote(c) for c in cmdline])
         print(s)
-        if not dry:
-            subprocess.check_call(cmdline)
+        if self.dry:
+            return
+        subprocess.check_call(cmdline)
 
 def get_singleton(obj):
     if isinstance(obj, dict) and len(obj.items()) == 1:
@@ -82,11 +126,15 @@ def obj_to_args(obj):
 def ensure_node(obj):
     return obj if isinstance(obj, Node) else parse(obj)
 
+def parse_time(t):
+    return float(t)
+
 class Node:
-    def __init__(self, v=1, a=1, s=0, **kwargs):
-        self.v = int(v)
-        self.a = int(a)
-        self.s = int(s)
+    def __init__(self, v=1, a=1, s=0, t=0, **kwargs):
+        self.v = v
+        self.a = a
+        self.s = s
+        self.t = t
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -94,8 +142,8 @@ class Node:
         return self.render(instance)
 
 class CompoundNode(Node):
-    def __init__(self, v=1, a=1, s=0, **kwargs):
-        super().__init__(v, a, s, **kwargs)
+    def __init__(self, v=1, a=1, s=0, t=0, **kwargs):
+        super().__init__(v, a, s, t, **kwargs)
         self._reduced = False
 
     def reduce_and_render(self, instance):
@@ -125,9 +173,11 @@ class CompoundNode(Node):
         return result
 
 class SimpleFilterNode(Node):
-    def __init__(self, input, name, *args, type="v", kwargs=None, **kwargs2):
+    def __init__(self, input, name, *args, type="v", t=None, kwargs=None, **kwargs2):
         input = ensure_node(input)
-        super().__init__(input.v, input.a, input.s)
+        if t is None:
+            t = input.t
+        super().__init__(input.v, input.a, input.s, t)
         self.input = input
         self.name = name
         self.type = type
@@ -181,12 +231,34 @@ class ChangeASpeedNode(SimpleFilterNode):
 
 def ChangeSpeedNode(input, speed, **kwargs):
     n1 = ChangeVSpeedNode(input, speed, **kwargs)
-    n2 = ChangeASpeedNode(n1, speed, **kwargs)
+    n2 = ChangeASpeedNode(n1, speed, t=input.t / speed, **kwargs)
     return n2
 
 class ClipNode(CompoundNode):
-    def __init__(self, file, start=None, duration=None, v=1, a=1, s=0, **kwargs):
-        super().__init__(file=file, start=start, duration=duration, v=v, a=a, s=s, **kwargs)
+    def __init__(self, file, start=None, duration=None, v=None, a=None, s=None, **kwargs):
+        info = analyze_file(file)
+        if start is not None:
+            start = parse_time(start)
+        if duration is not None:
+            duration = parse_time(duration)
+        if start is not None:
+            if duration is not None:
+                info["t"] = min(duration, info["t"] - start)
+            else: # duration is None
+                info["t"] = info["t"] - start
+        else: # start is None
+            if duration is not None:
+                info["t"] = min(duration, info["t"])
+        info.update({"file": file, "start": start, "duration": duration})
+        if v is not None:
+            info["v"] = v
+        if a is not None:
+            info["a"] = a
+        if s is not None:
+            info["s"] = s
+        info.update(kwargs)
+        print("t final", info["t"])
+        super().__init__(**info)
 
     def to_input_cmdline(self):
         cmdline = ["-i", self.file]
@@ -205,7 +277,7 @@ class ClipNode(CompoundNode):
                 gen_stream_names("s", self.s))
 
 class ConcatNode(CompoundNode):
-    def __init__(self, *args, v=None, a=None, **kwargs):
+    def __init__(self, *args, v=None, a=None, t=None, **kwargs):
         if len(args) == 1 and isinstance(args[0], list):
             inputs = args[0]
         elif len(args) >= 1:
@@ -219,7 +291,10 @@ class ConcatNode(CompoundNode):
             v = min([i.v for i in inputs])
         if a is None:
             a = min([i.a for i in inputs])
-        super().__init__(v, a, 0) # concat filter doesn't support subtitles
+        if t is None:
+            print("Summing", [i.t for i in inputs])
+            t = sum([i.t for i in inputs])
+        super().__init__(v, a, 0, t) # concat filter doesn't support subtitles
         self.inputs = inputs
 
     def render(self, instance):

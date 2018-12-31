@@ -11,7 +11,7 @@ all:
             - filter:
                 name: "setpts"
                 expr: 0.5*PTS
-            - 
+                t: 4
       - clip:
           file: ../vids/dive.mp4
           a: 0
