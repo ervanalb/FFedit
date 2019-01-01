@@ -1,7 +1,6 @@
 ---
 all:
   concat:
-    a: 0
     inputs:
       - clip:
           file: ../vids/dive.mp4
@@ -10,11 +9,11 @@ all:
           filters:
             - filter:
                 name: "setpts"
-                expr: 0.5*PTS
-                t: 4
+                args:
+                  - 0.5*PTS
+                t: 1
       - clip:
           file: ../vids/dive.mp4
-          a: 0
           start: 5
           duration: 2
           speed: 0.5

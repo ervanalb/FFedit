@@ -5,56 +5,16 @@ import sys
 import subprocess
 import shlex
 
-ffprobe = "ffprobe"
-ffprobe_flags = ["-loglevel", "warning", "-hide_banner", "-show_streams"]
-
-def analyze_file(file):
-    cmdline = [ffprobe] + ffprobe_flags + [file]
-    s = " ".join([shlex.quote(c) for c in cmdline])
-    print(s)
-    result = str(subprocess.check_output(cmdline), encoding="latin1")
-    lines = result.split("\n")
-    streams = []
-    cur_stream = {}
-    cur_tag = None
-    for l in lines:
-        if not l:
-            continue
-        if cur_tag is None:
-            if l == "[STREAM]":
-                cur_tag = l
-            else:
-                raise ValueError("Could not parse ffprobe output (expected [STREAM], got {})".format(l))
-        else:
-            if l == "[/STREAM]":
-                cur_tag = None
-                streams.append(cur_stream)
-                cur_stream = {}
-            else:
-                (k, v) = l.split("=")
-                cur_stream[k] = v
-    if cur_tag is not None:
-        raise ValueError("Could not parse ffprobe output (missing [/STREAM])")
-    video_streams = [s for s in streams if s.get("codec_type") == "video"]
-    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
-    # TODO subtitles?
-    result = {}
-    result["v"] = len(video_streams)
-    result["a"] = len(audio_streams)
-    result["s"] = 0
-    durations = [float(s["duration"]) for s in video_streams + audio_streams if "duration" in s]
-    if durations:
-        result["t"] = max(durations)
-    return result
-
 class FFmpegInstance:
     def __init__(self):
         self.ffmpeg = "ffmpeg"
+        self.ffprobe = "ffprobe"
         self.inputs = []
         self.input_n = 0
         self.filter = []
         self.filter_n = 0
         self.flags = ["-y", "-loglevel", "warning", "-stats"]
+        self.ffprobe_flags = ["-loglevel", "warning", "-hide_banner", "-show_streams"]
         self.map = []
         self.output = ["out.mkv"]
         self.dry = False
@@ -104,24 +64,51 @@ class FFmpegInstance:
             return
         subprocess.check_call(cmdline)
 
+    def analyze_file(self, file):
+        cmdline = [self.ffprobe] + self.ffprobe_flags + [file]
+        s = " ".join([shlex.quote(c) for c in cmdline])
+        print(s)
+        result = str(subprocess.check_output(cmdline), encoding="latin1")
+        lines = result.split("\n")
+        streams = []
+        cur_stream = {}
+        cur_tag = None
+        for l in lines:
+            if not l:
+                continue
+            if cur_tag is None:
+                if l == "[STREAM]":
+                    cur_tag = l
+                else:
+                    raise ValueError("Could not parse ffprobe output (expected [STREAM], got {})".format(l))
+            else:
+                if l == "[/STREAM]":
+                    cur_tag = None
+                    streams.append(cur_stream)
+                    cur_stream = {}
+                else:
+                    (k, v) = l.split("=")
+                    cur_stream[k] = v
+        if cur_tag is not None:
+            raise ValueError("Could not parse ffprobe output (missing [/STREAM])")
+        video_streams = [s for s in streams if s.get("codec_type") == "video"]
+        audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+        # TODO subtitles?
+        result = {}
+        result["v"] = len(video_streams)
+        result["a"] = len(audio_streams)
+        result["s"] = 0
+        durations = [float(s["duration"]) for s in video_streams + audio_streams if "duration" in s]
+        if durations:
+            result["t"] = max(durations)
+        return result
+
+
 def get_singleton(obj):
     if isinstance(obj, dict) and len(obj.items()) == 1:
         return tuple(obj.items())[0]
     else:
         raise TypeError("Expected a dict with one element, got {}".format(repr(obj)))
-
-def obj_to_args(obj):
-    args = []
-    kwargs = {}
-    if isinstance(obj, str) or isinstance(obj, float) or isinstance(obj, int):
-        args = [obj]
-    elif isinstance(obj, list):
-        args = obj
-    elif isinstance(obj, dict):
-        kwargs = obj
-    else:
-        raise TypeError("Expected scalar, list, or dict, but got {}".format(repr(obj)))
-    return (args, kwargs)
 
 def ensure_node(obj):
     return obj if isinstance(obj, Node) else parse(obj)
@@ -130,73 +117,74 @@ def parse_time(t):
     return float(t)
 
 class Node:
-    def __init__(self, v=1, a=1, s=0, t=0, **kwargs):
-        self.v = v
-        self.a = a
-        self.s = s
-        self.t = t
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+    @classmethod
+    def obj_to_args(cls, obj):
+        args = []
+        kwargs = {}
+        if isinstance(obj, str) or isinstance(obj, float) or isinstance(obj, int):
+            args = [obj]
+        elif isinstance(obj, list):
+            args = obj
+        elif isinstance(obj, dict):
+            kwargs = obj
+        else:
+            raise TypeError("Expected scalar, list, or dict, but got {}".format(repr(obj)))
+        return (args, kwargs)
 
-    def reduce_and_render(self, instance):
-        return self.render(instance)
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            if v is not None:
+                setattr(self, k, v)
+
+    @classmethod
+    def parse(cls, options, *args, **kwargs):
+        (pargs, pkwargs) = cls.obj_to_args(options)
+        pargs = args + tuple(pargs)
+        pkwargs.update(kwargs)
+        print(pargs, pkwargs)
+        return cls(*pargs, **pkwargs)
 
 class CompoundNode(Node):
-    def __init__(self, v=1, a=1, s=0, t=0, **kwargs):
-        super().__init__(v, a, s, t, **kwargs)
-        self._reduced = False
-
-    def reduce_and_render(self, instance):
-        if self._reduced:
-            return self.render(instance)
-
-        # This temporary flag prevents infinite recursion
-        self._reduced = True
-        n = self
-
+    @classmethod
+    def parse(cls, obj):
+        node = super().parse(obj)
         for k in IMPLICIT_FILTERS:
-            if hasattr(self, k):
-                options = getattr(self, k)
-                (args, kwargs) = obj_to_args(options)
-                n = FILTERS[k](n, *args, **kwargs)
+            if hasattr(node, k):
+                options = getattr(node, k)
+                node = FILTERS[k].parse(options, node)
 
-        if hasattr(self, "filters"):
-            for f in self.filters:
+        if hasattr(node, "filters"):
+            for f in node.filters:
                 if isinstance(f, str):
-                    n = FILTERS[k](n)
+                    n = FILTERS[k].parse(n)
                 else:
                     (k, options) = get_singleton(f)
-                    (args, kwargs) = obj_to_args(options)
-                    n = FILTERS[k](n, *args, **kwargs)
-        result = n.render(instance)
-        self._reduced = False
-        return result
+                    node = FILTERS[k].parse(options, node)
+        return node
 
 class SimpleFilterNode(Node):
-    def __init__(self, input, name, *args, type="v", t=None, kwargs=None, **kwargs2):
-        input = ensure_node(input)
-        if t is None:
-            t = input.t
-        super().__init__(input.v, input.a, input.s, t)
-        self.input = input
-        self.name = name
-        self.type = type
-        self.args = args
-        if kwargs is not None:
-            kwargs2.update(kwargs)
-        self.kwargs = kwargs2
+    def __init__(self, input, name, args=None, kwargs=None, type="v", **kwargs2):
+        super().__init__(input=input, name=name, args=args, kwargs=kwargs, type=type, **kwargs2)
+
+    def analyze(self, instance):
+        self.input.analyze(instance)
+        for attr in ("v", "a", "t"):
+            if hasattr(self.input, attr) and not hasattr(self, attr):
+                setattr(self, attr, getattr(self.input, attr))
 
     def run(self, instance, stream):
         filter = self.name
-        if self.kwargs or self.args:
+        args = self.args if hasattr(self, "args") else []
+        kwargs = self.kwargs if hasattr(self, "kwargs") else {}
+        if args or kwargs:
             filter += "=" + ":".join(
-                ["{}={}".format(k, v) for (k, v) in self.kwargs.items()] +
-                [str(v) for v in self.args]
+                ["{}={}".format(k, v) for (k, v) in kwargs.items()] +
+                [str(v) for v in args]
             )
         return instance.add_filter([stream], filter)[0]
 
     def render(self, instance):
-        (v, a, s) = self.input.reduce_and_render(instance)
+        (v, a, s) = self.input.render(instance)
         if "v" in self.type:
             v = [self.run(instance, stream) for stream in v]
         if "a" in self.type:
@@ -206,7 +194,7 @@ class SimpleFilterNode(Node):
         return (v, a, s)
 
 class ScaleNode(SimpleFilterNode):
-    def __init__(self, input, scale, *args, **kwargs):
+    def __init__(cls, input, scale, **kwargs):
         if isinstance(scale, str):
             if "x" in scale:
                 (w, h) = [int(dim) for dim in scale.split("x")]
@@ -215,50 +203,59 @@ class ScaleNode(SimpleFilterNode):
                 h = int(scale)
         else:
             (w, h) = [int(dim) for dim in scale]
-        super().__init__(input, "scale", *args, w=w, h=h, **kwargs)
+        super().__init__(input, "scale", args=(w, h), **kwargs)
 
 class ChangeVSpeedNode(SimpleFilterNode):
     def __init__(self, input, speed, **kwargs):
         speed = float(speed)
-        expr = "PTS*{}".format(1. / speed)
-        super().__init__(input, "setpts", expr, **kwargs)
+        expr = "PTS*{}".format(1. / speed) # TODO this shouldn't be done in init?
+        super().__init__(input, "setpts", args=(expr,), **kwargs)
 
 class ChangeASpeedNode(SimpleFilterNode):
     def __init__(self, input, speed, **kwargs):
         speed = float(speed)
         expr = "PTS*{}".format(1. / speed)
-        super().__init__(input, "asetpts", expr, type="a", **kwargs)
+        super().__init__(input, "asetpts", args=(expr,), type="a", **kwargs)
 
-def ChangeSpeedNode(input, speed, **kwargs):
-    n1 = ChangeVSpeedNode(input, speed, **kwargs)
-    n2 = ChangeASpeedNode(n1, speed, t=input.t / speed, **kwargs)
-    return n2
+class ChangeSpeedNode(Node): # TODO get rid of VSpeed and ASpeed
+    def __init__(self, input, speed, **kwargs):
+        self.speed = speed
+        self.n1 = ChangeVSpeedNode(input, speed, **kwargs)
+        self.n2 = ChangeASpeedNode(self.n1, speed, **kwargs)
+
+    def analyze(self, instance):
+        self.n2.analyze(instance)
+        for attr in ("v", "a", "t"):
+            if hasattr(self.n2, attr) and not hasattr(self, attr):
+                setattr(self, attr, getattr(self.n2, attr))
+
+        self.t = self.t / self.speed
+
+    def render(self, instance):
+        return self.n2.render(instance)
 
 class ClipNode(CompoundNode):
-    def __init__(self, file, start=None, duration=None, v=None, a=None, s=None, **kwargs):
-        info = analyze_file(file)
+    def __init__(self, file, start=None, duration=None, **kwargs):
         if start is not None:
             start = parse_time(start)
         if duration is not None:
             duration = parse_time(duration)
-        if start is not None:
-            if duration is not None:
-                info["t"] = min(duration, info["t"] - start)
+        super().__init__(file=file, start=start, duration=duration, **kwargs)
+
+    def analyze(self, instance):
+        info = instance.analyze_file(self.file)
+        for (k, v) in info.items():
+            if not hasattr(self, k):
+                setattr(self, k, v)
+
+        if hasattr(self, "start"):
+            if hasattr(self, "duration"):
+                self.t = min(self.duration, self.t - self.start)
             else: # duration is None
-                info["t"] = info["t"] - start
+                self.t = self.t - self.start
         else: # start is None
-            if duration is not None:
-                info["t"] = min(duration, info["t"])
-        info.update({"file": file, "start": start, "duration": duration})
-        if v is not None:
-            info["v"] = v
-        if a is not None:
-            info["a"] = a
-        if s is not None:
-            info["s"] = s
-        info.update(kwargs)
-        print("t final", info["t"])
-        super().__init__(**info)
+            if hasattr(self, "duration"):
+                self.t = min(self.duration, self.t)
 
     def to_input_cmdline(self):
         cmdline = ["-i", self.file]
@@ -277,28 +274,31 @@ class ClipNode(CompoundNode):
                 gen_stream_names("s", self.s))
 
 class ConcatNode(CompoundNode):
-    def __init__(self, *args, v=None, a=None, t=None, **kwargs):
+    def __init__(self, *args, **kwargs):
         if len(args) == 1 and isinstance(args[0], list):
             inputs = args[0]
         elif len(args) >= 1:
             inputs = args
         elif "inputs" in kwargs:
             inputs = kwargs["inputs"]
+            del kwargs["inputs"]
         else:
             raise TypeError("Could not deduce inputs for {}".format(__class__.__name__))
         inputs = [ensure_node(i) for i in inputs]
-        if v is None:
-            v = min([i.v for i in inputs])
-        if a is None:
-            a = min([i.a for i in inputs])
-        if t is None:
-            print("Summing", [i.t for i in inputs])
-            t = sum([i.t for i in inputs])
-        super().__init__(v, a, 0, t) # concat filter doesn't support subtitles
-        self.inputs = inputs
+        super().__init__(inputs=inputs, **kwargs)
+
+    def analyze(self, instance):
+        for i in self.inputs:
+            i.analyze(instance)
+        if not hasattr(self, "v"):
+            self.v = min([i.v for i in self.inputs])
+        if not hasattr(self, "a"):
+            self.a = min([i.a for i in self.inputs])
+        if not hasattr(self, "t"):
+            self.t = sum([i.t for i in self.inputs])
 
     def render(self, instance):
-        rendered_inputs = [i.reduce_and_render(instance) for i in self.inputs]
+        rendered_inputs = [i.render(instance) for i in self.inputs]
 
         stream_inputs = []
         for (v, a, s) in rendered_inputs:
@@ -323,8 +323,8 @@ class AddAudioNode(Node):
         self.kwargs = kwargs
 
     def render(self, instance):
-        (v, a1, s) = self.input.reduce_and_render(instance)
-        (_, a2, _) = self.audio.reduce_and_render(instance)
+        (v, a1, s) = self.input.render(instance)
+        (_, a2, _) = self.audio.render(instance)
         if len(a1) == 0: # If no existing audio, simply add the new audio tracks
             return (v, a2, s)
         filter = "amix=2"
@@ -342,13 +342,12 @@ class AddAudioNode(Node):
 
 def parse(obj):
     if isinstance(obj, str):
-        return ClipNode(obj)
+        return ClipNode.parse(obj)
     elif isinstance(obj, list):
-        return ConcatNode(*obj)
+        return ConcatNode.parse(obj)
     elif isinstance(obj, dict) and len(obj.items()) == 1:
         (node_name, options) = get_singleton(obj)
-        (args, kwargs) = obj_to_args(options)
-        return NODES[node_name](*args, **kwargs)
+        return NODES[node_name].parse(options)
     else:
         raise TypeError(obj)
 
@@ -386,7 +385,10 @@ if __name__ == "__main__":
     if "output" in obj:
         ff.set_output(obj["output"])
     node = parse(part)
-    ff.set_map(node.reduce_and_render(ff))
+    node.analyze(ff)
+    outputs = node.render(ff)
+    print("Output duration is", node.t)
+    ff.set_map(outputs)
     ff.run()
 
     #cmdline = flags + inputs + ["-filter_complex", concat_filter, "-map", "[outv]"] + output
