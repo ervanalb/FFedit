@@ -124,7 +124,9 @@ class Node:
     def obj_to_args(cls, obj):
         args = []
         kwargs = {}
-        if isinstance(obj, str) or isinstance(obj, float) or isinstance(obj, int):
+        if obj is None:
+            pass
+        elif isinstance(obj, str) or isinstance(obj, float) or isinstance(obj, int):
             args = [obj]
         elif isinstance(obj, list):
             args = obj
@@ -159,15 +161,15 @@ class CompoundNode(Node):
         if hasattr(orig_node, "filters"):
             for f in orig_node.filters:
                 if isinstance(f, str):
-                    n = FILTERS[k].parse(n)
+                    node = FILTERS[k].parse(None, node)
                 else:
                     (k, options) = get_singleton(f)
                     node = FILTERS[k].parse(options, node)
         return node
 
 class SimpleFilterNode(Node):
-    def __init__(self, input, name, args=None, kwargs=None, type="v", **kwargs2):
-        super().__init__(input=input, name=name, args=args, kwargs=kwargs, type=type, **kwargs2)
+    def __init__(self, input, name, args=None, kwargs=None, type="v", aname=None, aargs=None, akwargs=None, **kwargs2):
+        super().__init__(input=input, name=name, args=args, kwargs=kwargs, type=type, aname=aname, aargs=aargs, akwargs=akwargs, **kwargs2)
 
     def analyze(self, instance):
         self.input.analyze(instance)
@@ -175,23 +177,26 @@ class SimpleFilterNode(Node):
             if hasattr(self.input, attr) and not hasattr(self, attr):
                 setattr(self, attr, getattr(self.input, attr))
 
-    def run(self, instance, stream):
-        filter = self.name
-        args = self.args if hasattr(self, "args") else []
-        kwargs = self.kwargs if hasattr(self, "kwargs") else {}
+    def run(self, instance, stream, filter, args, kwargs):
         if args or kwargs:
             filter += "=" + ":".join(
-                ["{}={}".format(k, v) for (k, v) in kwargs.items()] +
-                [str(v) for v in args]
+                [str(v) for v in args] +
+                ["{}={}".format(k, v) for (k, v) in kwargs.items()]
             )
         return instance.add_filter([stream], filter)[0]
 
     def render(self, instance):
         (v, a) = self.input.render(instance)
+        args = self.args if hasattr(self, "args") else []
+        kwargs = self.kwargs if hasattr(self, "kwargs") else {}
+        filter = self.name
         if "v" in self.type:
-            v = [self.run(instance, stream) for stream in v]
+            v = [self.run(instance, stream, filter, args, kwargs) for stream in v]
         if "a" in self.type:
-            a = [self.run(instance, stream) for stream in a]
+            args = self.aargs if hasattr(self, "aargs") else args
+            kwargs = self.akwargs if hasattr(self, "akwargs") else kwargs
+            filter = self.aname if hasattr(self, "aname") else filter
+            a = [self.run(instance, stream, filter, args, kwargs) for stream in a]
         return (v, a)
 
 class ScaleNode(SimpleFilterNode):
@@ -224,6 +229,29 @@ class ChangeTempoNode(SimpleFilterNode):
         super().analyze(instance)
         self.speed_factor = parse_speed(self.speed, self.t)
         self.args = [self.speed_factor]
+
+class FadeInNode(SimpleFilterNode):
+    def __init__(self, input, duration=3, **kwargs):
+        super().__init__(input, "fade", duration=duration, type="av", aname="afade", args=["in"], **kwargs)
+
+    def analyze(self, instance):
+        super().analyze(instance)
+        self.duration_s = parse_time(self.duration)
+        if not hasattr(self, "kwargs"):
+            self.kwargs = {}
+        self.kwargs["duration"] = self.duration_s
+
+class FadeOutNode(SimpleFilterNode):
+    def __init__(self, input, duration=3, **kwargs):
+        super().__init__(input, "fade", duration=duration, type="av", aname="afade", args=["out"], **kwargs)
+
+    def analyze(self, instance):
+        super().analyze(instance)
+        self.duration_s = parse_time(self.duration)
+        if not hasattr(self, "kwargs"):
+            self.kwargs = {}
+        self.kwargs["start_time"] = self.t - self.duration_s
+        self.kwargs["duration"] = self.duration_s
 
 class ClipNode(CompoundNode):
     def __init__(self, file, start=None, duration=None, **kwargs):
@@ -316,8 +344,6 @@ class AddAudioNode(Node):
         self.v = self.input.v
         self.a = max(self.audio.a, self.input.a)
         self.t = max(self.audio.t, self.input.t) # TODO dependent on duration
-        print("aa v=", self.v)
-        print("aa a=", self.a)
 
     def render(self, instance):
         (v, a1) = self.input.render(instance)
@@ -356,6 +382,8 @@ IMPLICIT_FILTERS = [
     "speed",
     "addaudio",
     "tempo",
+    "fadein",
+    "fadeout",
 ]
 
 NODES = {
@@ -369,6 +397,8 @@ FILTERS = {
     "tempo": ChangeTempoNode,
     "filter": SimpleFilterNode,
     "addaudio": AddAudioNode,
+    "fadein": FadeInNode,
+    "fadeout": FadeOutNode,
 }
 
 NODES.update(FILTERS)
@@ -389,7 +419,6 @@ if __name__ == "__main__":
     if "output" in obj:
         ff.set_output(obj["output"])
     node = parse(part)
-    print("Root node is", node)
     node.analyze(ff)
     outputs = node.render(ff)
     ff.set_map(outputs)

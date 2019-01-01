@@ -21,4 +21,7 @@ all:
       - file: ../mambo.mp3
         start: 10
         duration: 4
+    filters:
+      - fadein
+      - fadeout
 output: ["-preset", "ultrafast", "output.mkv"]
