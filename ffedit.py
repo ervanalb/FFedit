@@ -161,7 +161,7 @@ class CompoundNode(Node):
         if hasattr(orig_node, "filters"):
             for f in orig_node.filters:
                 if isinstance(f, str):
-                    node = FILTERS[k].parse(None, node)
+                    node = FILTERS[f].parse(None, node)
                 else:
                     (k, options) = get_singleton(f)
                     node = FILTERS[k].parse(options, node)
@@ -250,8 +250,8 @@ class FadeOutNode(SimpleFilterNode):
         self.duration_s = parse_time(self.duration)
         if not hasattr(self, "kwargs"):
             self.kwargs = {}
-        self.kwargs["start_time"] = self.t - self.duration_s
         self.kwargs["duration"] = self.duration_s
+        self.kwargs["start_time"] = self.t - self.duration_s
 
 class ClipNode(CompoundNode):
     def __init__(self, file, start=None, duration=None, **kwargs):

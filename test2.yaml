@@ -6,17 +6,10 @@ all:
           file: ../vids/dive.mp4
           start: 5
           duration: 2
-          filters:
-            - filter:
-                name: "setpts"
-                args:
-                  - 0.5*PTS
-                t: 1
       - clip:
           file: ../vids/dive.mp4
           start: 5
           duration: 2
-          speed: 3
     addaudio:
       - file: ../mambo.mp3
         start: 10
