@@ -45,8 +45,8 @@ class FFmpegInstance:
         self.flags = flags
 
     def set_map(self, rendered_node):
-        (v, a, s) = rendered_node
-        for stream in v + a + s:
+        (v, a) = rendered_node
+        for stream in v + a:
             self.map += ["-map", "{}".format(stream)]
 
     def set_output(self, output):
@@ -93,16 +93,13 @@ class FFmpegInstance:
             raise ValueError("Could not parse ffprobe output (missing [/STREAM])")
         video_streams = [s for s in streams if s.get("codec_type") == "video"]
         audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
-        # TODO subtitles?
         result = {}
         result["v"] = len(video_streams)
         result["a"] = len(audio_streams)
-        result["s"] = 0
         durations = [float(s["duration"]) for s in video_streams + audio_streams if "duration" in s]
         if durations:
             result["t"] = max(durations)
         return result
-
 
 def get_singleton(obj):
     if isinstance(obj, dict) and len(obj.items()) == 1:
@@ -115,6 +112,12 @@ def ensure_node(obj):
 
 def parse_time(t):
     return float(t)
+
+def parse_speed(s, orig_length):
+    if isinstance(s, str) and s.endswith("x"):
+        return float(s[:-1])
+    else:
+        return orig_length / parse_time(s)
 
 class Node:
     @classmethod
@@ -141,7 +144,6 @@ class Node:
         (pargs, pkwargs) = cls.obj_to_args(options)
         pargs = args + tuple(pargs)
         pkwargs.update(kwargs)
-        print(pargs, pkwargs)
         return cls(*pargs, **pkwargs)
 
 class CompoundNode(Node):
@@ -184,14 +186,12 @@ class SimpleFilterNode(Node):
         return instance.add_filter([stream], filter)[0]
 
     def render(self, instance):
-        (v, a, s) = self.input.render(instance)
+        (v, a) = self.input.render(instance)
         if "v" in self.type:
             v = [self.run(instance, stream) for stream in v]
         if "a" in self.type:
             a = [self.run(instance, stream) for stream in a]
-        if "s" in self.type:
-            s = [self.run(instance, stream) for stream in s]
-        return (v, a, s)
+        return (v, a)
 
 class ScaleNode(SimpleFilterNode):
     def __init__(cls, input, scale, **kwargs):
@@ -207,17 +207,23 @@ class ScaleNode(SimpleFilterNode):
 
 class ChangeVSpeedNode(SimpleFilterNode):
     def __init__(self, input, speed, **kwargs):
-        speed = float(speed)
-        expr = "PTS*{}".format(1. / speed) # TODO this shouldn't be done in init?
-        super().__init__(input, "setpts", args=(expr,), **kwargs)
+        super().__init__(input, "setpts", speed=speed, **kwargs)
+
+    def analyze(self, instance):
+        super().analyze(instance)
+        self.speed_factor = parse_speed(self.speed, self.t)
+        self.args = ["PTS*{}".format(1. / self.speed_factor)]
 
 class ChangeASpeedNode(SimpleFilterNode):
     def __init__(self, input, speed, **kwargs):
-        speed = float(speed)
-        expr = "PTS*{}".format(1. / speed)
-        super().__init__(input, "asetpts", args=(expr,), type="a", **kwargs)
+        super().__init__(input, "asetpts", speed=speed, type="a", **kwargs)
 
-class ChangeSpeedNode(Node): # TODO get rid of VSpeed and ASpeed
+    def analyze(self, instance):
+        super().analyze(instance)
+        self.speed_factor = parse_speed(self.speed, self.t)
+        self.args = ["PTS*{}".format(1. / self.speed_factor)]
+
+class ChangeSpeedNode(Node):
     def __init__(self, input, speed, **kwargs):
         self.speed = speed
         self.n1 = ChangeVSpeedNode(input, speed, **kwargs)
@@ -225,11 +231,11 @@ class ChangeSpeedNode(Node): # TODO get rid of VSpeed and ASpeed
 
     def analyze(self, instance):
         self.n2.analyze(instance)
-        for attr in ("v", "a", "t"):
+        for attr in ("v", "a", "t", "speed", "speed_factor"):
             if hasattr(self.n2, attr) and not hasattr(self, attr):
                 setattr(self, attr, getattr(self.n2, attr))
 
-        self.t = self.t / self.speed
+        self.t = self.t / self.speed_factor
 
     def render(self, instance):
         return self.n2.render(instance)
@@ -270,8 +276,7 @@ class ClipNode(CompoundNode):
         def gen_stream_names(type, count):
             return ["{}:{}:{}".format(stream_n, type, i) for i in range(count)]
         return (gen_stream_names("v", self.v),
-                gen_stream_names("a", self.a),
-                gen_stream_names("s", self.s))
+                gen_stream_names("a", self.a))
 
 class ConcatNode(CompoundNode):
     def __init__(self, *args, **kwargs):
@@ -301,7 +306,7 @@ class ConcatNode(CompoundNode):
         rendered_inputs = [i.render(instance) for i in self.inputs]
 
         stream_inputs = []
-        for (v, a, s) in rendered_inputs:
+        for (v, a) in rendered_inputs:
             stream_inputs += v[0:self.v]
             stream_inputs += a[0:self.a]
 
@@ -310,7 +315,7 @@ class ConcatNode(CompoundNode):
         outputs = instance.add_filter(stream_inputs, filter, self.v + self.a)
         v_outputs = outputs[0:self.v]
         a_outputs = outputs[self.v:]
-        return (v_outputs, a_outputs, [])
+        return (v_outputs, a_outputs)
 
 class AddAudioNode(Node):
     def __init__(self, input, audio, *args, **kwargs):
@@ -323,10 +328,10 @@ class AddAudioNode(Node):
         self.kwargs = kwargs
 
     def render(self, instance):
-        (v, a1, s) = self.input.render(instance)
-        (_, a2, _) = self.audio.render(instance)
+        (v, a1) = self.input.render(instance)
+        (_, a2) = self.audio.render(instance)
         if len(a1) == 0: # If no existing audio, simply add the new audio tracks
-            return (v, a2, s)
+            return (v, a2)
         filter = "amix=2"
         if self.kwargs or self.args:
             filter += ":" + ":".join(
@@ -335,10 +340,10 @@ class AddAudioNode(Node):
             )
         if len(a1) == len(a2): # Element-wise mixing
             a_out = [instance.add_filter([t1, t2], filter)[0] for (t1, t2) in zip(a1, a2)]
-            return (v, a_out, s)
+            return (v, a_out)
         # Mix the same audio track with every input track
         a_out = [instance.add_filter([stream, a2[0]], filter)[0] for stream in a1]
-        return (v, a_out, s)
+        return (v, a_out)
 
 def parse(obj):
     if isinstance(obj, str):
@@ -387,9 +392,5 @@ if __name__ == "__main__":
     node = parse(part)
     node.analyze(ff)
     outputs = node.render(ff)
-    print("Output duration is", node.t)
     ff.set_map(outputs)
     ff.run()
-
-    #cmdline = flags + inputs + ["-filter_complex", concat_filter, "-map", "[outv]"] + output
-
