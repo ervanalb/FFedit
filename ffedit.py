@@ -149,14 +149,15 @@ class Node:
 class CompoundNode(Node):
     @classmethod
     def parse(cls, obj):
-        node = super().parse(obj)
+        orig_node = super().parse(obj)
+        node = orig_node
         for k in IMPLICIT_FILTERS:
-            if hasattr(node, k):
-                options = getattr(node, k)
+            if hasattr(orig_node, k):
+                options = getattr(orig_node, k)
                 node = FILTERS[k].parse(options, node)
 
-        if hasattr(node, "filters"):
-            for f in node.filters:
+        if hasattr(orig_node, "filters"):
+            for f in orig_node.filters:
                 if isinstance(f, str):
                     n = FILTERS[k].parse(n)
                 else:
@@ -205,7 +206,7 @@ class ScaleNode(SimpleFilterNode):
             (w, h) = [int(dim) for dim in scale]
         super().__init__(input, "scale", args=(w, h), **kwargs)
 
-class ChangeVSpeedNode(SimpleFilterNode):
+class ChangeSpeedNode(SimpleFilterNode):
     def __init__(self, input, speed, **kwargs):
         super().__init__(input, "setpts", speed=speed, **kwargs)
 
@@ -213,32 +214,16 @@ class ChangeVSpeedNode(SimpleFilterNode):
         super().analyze(instance)
         self.speed_factor = parse_speed(self.speed, self.t)
         self.args = ["PTS*{}".format(1. / self.speed_factor)]
+        self.t = self.t / self.speed_factor
 
-class ChangeASpeedNode(SimpleFilterNode):
+class ChangeTempoNode(SimpleFilterNode):
     def __init__(self, input, speed, **kwargs):
-        super().__init__(input, "asetpts", speed=speed, type="a", **kwargs)
+        super().__init__(input, "atempo", speed=speed, type="a", **kwargs)
 
     def analyze(self, instance):
         super().analyze(instance)
         self.speed_factor = parse_speed(self.speed, self.t)
-        self.args = ["PTS*{}".format(1. / self.speed_factor)]
-
-class ChangeSpeedNode(Node):
-    def __init__(self, input, speed, **kwargs):
-        self.speed = speed
-        self.n1 = ChangeVSpeedNode(input, speed, **kwargs)
-        self.n2 = ChangeASpeedNode(self.n1, speed, **kwargs)
-
-    def analyze(self, instance):
-        self.n2.analyze(instance)
-        for attr in ("v", "a", "t", "speed", "speed_factor"):
-            if hasattr(self.n2, attr) and not hasattr(self, attr):
-                setattr(self, attr, getattr(self.n2, attr))
-
-        self.t = self.t / self.speed_factor
-
-    def render(self, instance):
-        return self.n2.render(instance)
+        self.args = [self.speed_factor]
 
 class ClipNode(CompoundNode):
     def __init__(self, file, start=None, duration=None, **kwargs):
@@ -265,9 +250,9 @@ class ClipNode(CompoundNode):
 
     def to_input_cmdline(self):
         cmdline = ["-i", self.file]
-        if self.duration is not None:
+        if hasattr(self, "duration"):
             cmdline = ["-t", str(self.duration)] + cmdline
-        if self.start is not None:
+        if hasattr(self, "start"):
             cmdline = ["-ss", str(self.start)] + cmdline
         return cmdline
 
@@ -318,14 +303,21 @@ class ConcatNode(CompoundNode):
         return (v_outputs, a_outputs)
 
 class AddAudioNode(Node):
-    def __init__(self, input, audio, *args, **kwargs):
-        if audio.a == 0 or (input.a > 0 and audio.a != 1 and audio.a != input.a):
+    def __init__(self, input, audio, **kwargs):
+        input = ensure_node(input)
+        audio = ensure_node(audio)
+        super().__init__(input=input, audio=audio, **kwargs)
+
+    def analyze(self, instance):
+        self.input.analyze(instance)
+        self.audio.analyze(instance)
+        if self.audio.a == 0 or (self.input.a > 0 and self.audio.a != 1 and self.audio.a != self.input.a):
             raise Exception("Bad number of audio tracks to mix in")
-        super().__init__(input.v, max(audio.a, input.a), input.s)
-        self.input = input
-        self.audio = audio
-        self.args = args
-        self.kwargs = kwargs
+        self.v = self.input.v
+        self.a = max(self.audio.a, self.input.a)
+        self.t = max(self.audio.t, self.input.t) # TODO dependent on duration
+        print("aa v=", self.v)
+        print("aa a=", self.a)
 
     def render(self, instance):
         (v, a1) = self.input.render(instance)
@@ -350,15 +342,20 @@ def parse(obj):
         return ClipNode.parse(obj)
     elif isinstance(obj, list):
         return ConcatNode.parse(obj)
-    elif isinstance(obj, dict) and len(obj.items()) == 1:
-        (node_name, options) = get_singleton(obj)
-        return NODES[node_name].parse(options)
+    elif isinstance(obj, dict):
+        if len(obj.items()) == 1:
+            (node_name, options) = get_singleton(obj)
+            return NODES[node_name].parse(options)
+        else:
+            return ClipNode.parse(obj)
     else:
         raise TypeError(obj)
 
 IMPLICIT_FILTERS = [
     "scale",
-    "speed"
+    "speed",
+    "addaudio",
+    "tempo",
 ]
 
 NODES = {
@@ -369,7 +366,9 @@ NODES = {
 FILTERS = {
     "scale": ScaleNode,
     "speed": ChangeSpeedNode,
+    "tempo": ChangeTempoNode,
     "filter": SimpleFilterNode,
+    "addaudio": AddAudioNode,
 }
 
 NODES.update(FILTERS)
@@ -390,6 +389,7 @@ if __name__ == "__main__":
     if "output" in obj:
         ff.set_output(obj["output"])
     node = parse(part)
+    print("Root node is", node)
     node.analyze(ff)
     outputs = node.render(ff)
     ff.set_map(outputs)

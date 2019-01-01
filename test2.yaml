@@ -17,5 +17,8 @@ all:
           start: 5
           duration: 2
           speed: 3
-    #audio: ../mambo.mp3
+    addaudio:
+      - file: ../mambo.mp3
+        start: 10
+        duration: 4
 output: ["-preset", "ultrafast", "output.mkv"]
