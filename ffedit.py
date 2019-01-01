@@ -4,6 +4,8 @@ import yaml
 import sys
 import subprocess
 import shlex
+import argparse
+import os
 
 class FFmpegInstance:
     def __init__(self):
@@ -18,6 +20,7 @@ class FFmpegInstance:
         self.map = []
         self.output = ["out.mkv"]
         self.dry = False
+        self.path = ""
 
     def add_input(self, i):
         self.inputs += i
@@ -41,16 +44,13 @@ class FFmpegInstance:
         self.filter.append(input_str + filt + output_str)
         return outputs
 
-    def set_flags(self, flags):
-        self.flags = flags
-
     def set_map(self, rendered_node):
         (v, a) = rendered_node
         for stream in v + a:
             self.map += ["-map", "{}".format(stream)]
 
-    def set_output(self, output):
-        self.output = output
+    def file(self, fn):
+        return os.path.join(self.path, fn)
 
     def run(self):
         filter = []
@@ -276,8 +276,8 @@ class ClipNode(CompoundNode):
             if hasattr(self, "duration"):
                 self.t = min(self.duration, self.t)
 
-    def to_input_cmdline(self):
-        cmdline = ["-i", self.file]
+    def to_input_cmdline(self, instance):
+        cmdline = ["-i", instance.file(self.file)]
         if hasattr(self, "duration"):
             cmdline = ["-t", str(self.duration)] + cmdline
         if hasattr(self, "start"):
@@ -285,7 +285,7 @@ class ClipNode(CompoundNode):
         return cmdline
 
     def render(self, instance):
-        stream_n = instance.add_input(self.to_input_cmdline())
+        stream_n = instance.add_input(self.to_input_cmdline(instance))
         def gen_stream_names(type, count):
             return ["{}:{}:{}".format(stream_n, type, i) for i in range(count)]
         return (gen_stream_names("v", self.v),
@@ -404,20 +404,35 @@ FILTERS = {
 NODES.update(FILTERS)
 
 if __name__ == "__main__":
-    fn = sys.argv[1]
-    with open(fn) as f:
+    parser = argparse.ArgumentParser(description="Command-line video editing software that is just a thin wrapper around FFmpeg")
+    parser.add_argument("recipe", help="A YAML file describing how to render the video")
+    parser.add_argument("target", nargs="?", default="all", help="Which key in the recipe to render")
+    parser.add_argument("-C", "--working-dir", dest="path", help="Look in this directory for media referenced in the recipe")
+    parser.add_argument("-o", "--output", help="Which key in the recipe to use for the output command (will use 'output' if unspecified)")
+    parser.add_argument("-f", "--flags", help="Which key in the recipe to use for the FFmpeg flags (will use 'flags' if unspecified)")
+    parser.add_argument("--dry", action="store_true", help="Do not run any FFmpeg commands (FFprobe will still run)")
+
+    args = parser.parse_args()
+
+    with open(args.recipe) as f:
         obj = yaml.load(f)
 
-    target = "all" if len(sys.argv) < 3 else sys.argv[2]
-
-    part = obj[target]
+    part = obj[args.target]
 
     ff = FFmpegInstance()
 
-    if "flags" in obj:
-        ff.set_flags(obj["flags"])
-    if "output" in obj:
-        ff.set_output(obj["output"])
+    if args.flags:
+        ff.flags = obj[args.flags]
+    elif "flags" in obj:
+        ff.flags = obj["flags"]
+    if args.output:
+        ff.output = obj[args.output]
+    elif "output" in obj:
+        ff.output = obj["output"]
+    if args.path:
+        ff.path = args.path
+    if args.dry:
+        ff.dry = True
     node = parse(part)
     node.analyze(ff)
     outputs = node.render(ff)
