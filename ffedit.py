@@ -65,7 +65,7 @@ class FFmpegInstance:
         subprocess.check_call(cmdline)
 
     def analyze_file(self, file):
-        cmdline = [self.ffprobe] + self.ffprobe_flags + [file]
+        cmdline = [self.ffprobe] + self.ffprobe_flags + [self.file(file)]
         s = " ".join([shlex.quote(c) for c in cmdline])
         print(s)
         result = str(subprocess.check_output(cmdline), encoding="latin1")
@@ -111,6 +111,21 @@ def ensure_node(obj):
     return obj if isinstance(obj, Node) else parse(obj)
 
 def parse_time(t):
+    if isinstance(t, float) or isinstance(t, int):
+        return float(t)
+    if ":" in t:
+        parts = t.split(":")
+        if len(parts) == 2:
+            (m, s) = parts
+            m = int(m) if m else 0
+            s = float(s)
+            return m * 60 + s
+        if len(parts) == 3:
+            (h, m, s) = parts
+            h = int(h) if h else 0
+            m = int(m) if m else 0
+            s = float(s)
+            return h * 3600 + m * 60 + s
     return float(t)
 
 def parse_speed(s, orig_length):
