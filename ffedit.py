@@ -184,6 +184,7 @@ class CompoundNode(Node):
 
 class SimpleFilterNode(Node):
     def __init__(self, input, name, args=None, kwargs=None, type="v", aname=None, aargs=None, akwargs=None, **kwargs2):
+        input = ensure_node(input)
         super().__init__(input=input, name=name, args=args, kwargs=kwargs, type=type, aname=aname, aargs=aargs, akwargs=akwargs, **kwargs2)
 
     def analyze(self, instance):
