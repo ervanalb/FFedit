@@ -1,31 +1,6 @@
 # FFedit
 Command-line video editing software that is just a thin wrapper around FFmpeg
 
-## Usage
-```
-usage: ffedit recipe [target] [-h] [-C PATH] [-o OUTPUT] [-f FLAGS] [--dry]
-
-Command-line video editing software that is just a thin wrapper around FFmpeg
-
-positional arguments:
-  recipe                A YAML file describing how to render the video
-  target                Which key in the recipe to render
-
-optional arguments:
-  -h, --help            show this help message and exit
-  -C PATH, --working-dir PATH
-                        Look in this directory for media referenced in the
-                        recipe
-  -o OUTPUT, --output OUTPUT
-                        Which key in the recipe to use for the output command
-                        (will use 'output' if unspecified)
-  -f FLAGS, --flags FLAGS
-                        Which key in the recipe to use for the FFmpeg flags
-                        (will use 'flags' if unspecified)
-  --dry                 Do not run any FFmpeg commands (FFprobe will still
-                        run)
-```
-
 ## Simple example
 FFedit takes in a YAML file describing how to cut and splice your video. Here is a very simple example:
 ```yaml
@@ -35,6 +10,8 @@ all:
 ```
 
 This will join `a.mkv` and `b.mkv` together and create a file called `out.mkv`.
+
+It will result in the following FFmpeg command:
 
 ```
 ffmpeg \
@@ -56,10 +33,10 @@ output:
 You can do the same for the flags at the beginning of the command line by adding a `flags` section.
 
 FFedit builds the `all` target by default. You can specify a second command line argument to build a different target.
-You can also build with a different set of `flags` or `output` by specifying `-o` or `-f`.
+You can also build with a different set of `flags` or `output` by specifying `-f` or `-o`.
 This is useful for different output qualities or formats, for instance a quick draft render vs a final render.
 
-In order to splice the clips, you need to expand the files into more verbose forms:
+In order to trim the videos, you need to expand the clip into more verbose form:
 ```yaml
 all:
   - clip:
@@ -111,7 +88,7 @@ all:
           speed: 2x
 ```
 
-FFedit is hierarchical. The `concat` object is just like a `clip` object. For instance, you can apply filters to `concat`
+FFedit is hierarchical. The `concat` object is just like a `clip` object. For instance, you can apply filters to `concat`:
 ```yaml
 all:
   concat:
@@ -130,7 +107,7 @@ all:
 
 ## More advanced usage
 
-YAML references can be used to create a hierarchical project. You can render only scene1 by specifying `target` on the command line.
+YAML references can be used to create a hierarchical project. You can render only `scene1` by specifying `target` on the command line.
 
 ```yaml
 scene1: &sceen1
@@ -169,7 +146,7 @@ The `addaudio` filter can be used to e.g. mix in background muxic:
 ```yaml
 all:
   concat:
-    a: 0 # Ignore audio track if it exists
+    a: 0
     inputs:
       - a.mkv
       - b.mkv
@@ -205,4 +182,29 @@ all:
                 # (this is the default)
         args: ["0.5 * PTS"]
         t: 3 # Correct for length change so things like fadeout work properly
+```
+
+## Usage
+```
+usage: ffedit recipe [target] [-h] [-C PATH] [-o OUTPUT] [-f FLAGS] [--dry]
+
+Command-line video editing software that is just a thin wrapper around FFmpeg
+
+positional arguments:
+  recipe                A YAML file describing how to render the video
+  target                Which key in the recipe to render
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -C PATH, --working-dir PATH
+                        Look in this directory for media referenced in the
+                        recipe
+  -o OUTPUT, --output OUTPUT
+                        Which key in the recipe to use for the output command
+                        (will use 'output' if unspecified)
+  -f FLAGS, --flags FLAGS
+                        Which key in the recipe to use for the FFmpeg flags
+                        (will use 'flags' if unspecified)
+  --dry                 Do not run any FFmpeg commands (FFprobe will still
+                        run)
 ```
